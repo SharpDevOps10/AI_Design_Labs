@@ -6,7 +6,7 @@ import tkinter as tk
 from PIL import Image, ImageDraw
 from keras.src.datasets import mnist
 
-class_names = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+digits = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
 
 
 def display_random_images(images, labels, num_images=25):
@@ -16,14 +16,14 @@ def display_random_images(images, labels, num_images=25):
         plt.subplot(5, 5, i + 1)
         plot_image(images[idx], labels[idx])
     plt.show()
-1
+
 
 def plot_image(img, label):
     plt.xticks([])
     plt.yticks([])
     plt.grid(False)
     plt.imshow(img, cmap=plt.cm.binary)
-    plt.xlabel(class_names[np.argmax(label)])
+    plt.xlabel(digits[np.argmax(label)])
 
 
 def load_and_preprocess_data():
