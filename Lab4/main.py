@@ -1,12 +1,9 @@
 import os
-import shutil
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras import layers, models
 from tensorflow.keras.applications import EfficientNetB0
-from tensorflow.keras.callbacks import ReduceLROnPlateau
 
 translate_dict = {
     "cane": "dog", "gatto": "cat", "cavallo": "horse", "ragno": "spider",
@@ -39,6 +36,7 @@ AUTOTUNE = tf.data.AUTOTUNE
 train_dataset = train_ds.prefetch(buffer_size=AUTOTUNE)
 val_dataset = val_ds.prefetch(buffer_size=AUTOTUNE)
 
+
 def alexnet_model(input_shape=(227, 227, 3), num_classes=10):
     model = models.Sequential([
         layers.Conv2D(96, (11, 11), strides=(4, 4), activation='relu', input_shape=input_shape),
@@ -61,6 +59,7 @@ def alexnet_model(input_shape=(227, 227, 3), num_classes=10):
     ])
     return model
 
+
 def efficientnet_model(input_shape=(227, 227, 3), num_classes=10):
     base_model = EfficientNetB0(weights="imagenet", include_top=False, input_shape=input_shape)
     base_model.trainable = False
@@ -72,6 +71,7 @@ def efficientnet_model(input_shape=(227, 227, 3), num_classes=10):
         layers.Dense(num_classes, activation="softmax")
     ])
     return model
+
 
 model_alexnet = alexnet_model()
 model_alexnet.compile(
@@ -99,11 +99,13 @@ print(f'AlexNet Test accuracy: {test_acc_alexnet}')
 test_loss_efficientnet, test_acc_efficientnet = model_efficientnet.evaluate(val_dataset)
 print(f'EfficientNet Test accuracy: {test_acc_efficientnet}')
 
+
 def ensemble_predict(image):
     pred_alexnet = model_alexnet.predict(image)
     pred_efficientnet = model_efficientnet.predict(image)
     final_pred = (pred_alexnet + pred_efficientnet) / 2
     return np.argmax(final_pred, axis=1)
+
 
 test_images, test_labels = next(iter(val_dataset))
 
