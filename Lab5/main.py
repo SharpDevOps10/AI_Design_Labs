@@ -1,117 +1,145 @@
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as transforms
+import torchvision.datasets as datasets
+from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
+from PIL import Image
 import os
-import numpy as np
 import json
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, GlobalAveragePooling2D, Dense, Input
-from tensorflow.keras.models import Model
-from tensorflow.keras.preprocessing.image import load_img, img_to_array
-from tensorflow.keras.utils import image_dataset_from_directory
-from tensorflow.keras.layers import concatenate
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 dataset_path = "/content/dogs/dog-breeds"
 
-batch_size = 32
-img_size = (299, 299)
+transform = transforms.Compose([
+    transforms.Resize((299, 299)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
 
-train_dataset = image_dataset_from_directory(
-    dataset_path,
-    image_size=img_size,
-    batch_size=batch_size,
-    validation_split=0.2,
-    subset="training",
-    seed=123
-)
+dataset = datasets.ImageFolder(root=dataset_path, transform=transform)
+print(f"Кількість зображень у датасеті: {len(dataset)}")
 
-val_dataset = image_dataset_from_directory(
-    dataset_path,
-    image_size=img_size,
-    batch_size=batch_size,
-    validation_split=0.2,
-    subset="validation",
-    seed=123
-)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-class_names = train_dataset.class_names
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32)
+
+class_names = dataset.classes
 num_classes = len(class_names)
 print(f"Класи: {class_names}")
 
 
-def preprocess(image, label):
-    image = tf.keras.applications.inception_v3.preprocess_input(image)
-    return image, label
+class InceptionBlock(nn.Module):
+    def __init__(self, in_channels, f1, f3_in, f3_out, f5_in, f5_out, pool_proj):
+        super(InceptionBlock, self).__init__()
+
+        self.conv1x1 = nn.Conv2d(in_channels, f1, kernel_size=1)
+        self.conv3x3_1 = nn.Conv2d(in_channels, f3_in, kernel_size=1)
+        self.conv3x3_2 = nn.Conv2d(f3_in, f3_out, kernel_size=3, padding=1)
+        self.conv5x5_1 = nn.Conv2d(in_channels, f5_in, kernel_size=1)
+        self.conv5x5_2 = nn.Conv2d(f5_in, f5_out, kernel_size=5, padding=2)
+        self.pool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        self.pool_conv = nn.Conv2d(in_channels, pool_proj, kernel_size=1)
+
+    def forward(self, x):
+        branch1 = self.conv1x1(x)
+        branch2 = torch.relu(self.conv3x3_2(torch.relu(self.conv3x3_1(x))))
+        branch3 = torch.relu(self.conv5x5_2(torch.relu(self.conv5x5_1(x))))
+        branch4 = self.pool_conv(self.pool(x))
+        return torch.cat([branch1, branch2, branch3, branch4], dim=1)
 
 
-train_dataset = train_dataset.map(preprocess)
-val_dataset = val_dataset.map(preprocess)
+class InceptionV3Custom(nn.Module):
+    def __init__(self, num_classes):
+        super(InceptionV3Custom, self).__init__()
+
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+        self.inception1 = InceptionBlock(128, 64, 48, 64, 8, 16, 32)
+        self.inception2 = InceptionBlock(176, 128, 64, 128, 16, 32, 64)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(352, num_classes)
+
+    def forward(self, x):
+        x = torch.relu(self.conv1(x))
+        x = torch.relu(self.conv2(x))
+        x = torch.relu(self.conv3(x))
+        x = self.inception1(x)
+        x = self.inception2(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        return self.fc(x)
 
 
-def InceptionBlock(x, filters):
-    f1, f3r, f3, f5r, f5, proj = filters
+model = InceptionV3Custom(num_classes).to(device)
+print(model)
 
-    conv1x1_1 = Conv2D(f1, (1, 1), padding='same', activation='relu')(x)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    conv3x3 = Conv2D(f3r, (1, 1), padding='same', activation='relu')(x)
-    conv3x3 = Conv2D(f3, (3, 3), padding='same', activation='relu')(conv3x3)
+train_losses, val_losses = [], []
+train_accuracies, val_accuracies = [], []
 
-    conv5x5 = Conv2D(f5r, (1, 1), padding='same', activation='relu')(x)
-    conv5x5 = Conv2D(f5, (5, 5), padding='same', activation='relu')(conv5x5)
-    maxpool = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
-    maxpool = Conv2D(proj, (1, 1), padding='same', activation='relu')(maxpool)
+num_epochs = 50
+for epoch in range(num_epochs):
+    model.train()
+    running_loss, correct, total = 0.0, 0, 0
 
-    output = concatenate([conv1x1_1, conv3x3, conv5x5, maxpool], axis=-1)
-    return output
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+        _, preds = torch.max(outputs, 1)
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
 
+    train_losses.append(running_loss / len(train_loader))
+    train_accuracies.append(correct / total)
 
-def InceptionV3Custom(num_classes):
-    input_layer = Input(shape=(299, 299, 3))
+    model.eval()
+    val_loss, correct_val, total_val = 0.0, 0, 0
 
-    x = Conv2D(32, (3, 3), strides=(2, 2), padding='valid', activation='relu')(input_layer)
-    x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
-    x = MaxPooling2D((3, 3), strides=(2, 2))(x)
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item()
+            _, preds = torch.max(outputs, 1)
+            correct_val += (preds == labels).sum().item()
+            total_val += labels.size(0)
 
-    x = Conv2D(80, (1, 1), padding='valid', activation='relu')(x)
-    x = Conv2D(192, (3, 3), padding='valid', activation='relu')(x)
-    x = MaxPooling2D((3, 3), strides=(2, 2))(x)
+    val_losses.append(val_loss / len(val_loader))
+    val_accuracies.append(correct_val / total_val)
 
-    x = InceptionBlock(x, (64, 48, 64, 64, 96, 32))
-    x = InceptionBlock(x, (64, 48, 64, 64, 96, 64))
-    x = InceptionBlock(x, (64, 48, 64, 64, 96, 64))
-
-    x = GlobalAveragePooling2D()(x)
-    x = Dense(1024, activation='relu')(x)
-    predictions = Dense(num_classes, activation='softmax')(x)
-
-    model = Model(inputs=input_layer, outputs=predictions)
-    return model
-
-
-model = InceptionV3Custom(num_classes)
-model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
-model.summary()
-
-epochs = 50
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=epochs
-)
+    print(
+        f"Епоха {epoch + 1}: Втрата: {train_losses[-1]:.4f}, Точність: {train_accuracies[-1]:.4f} | Валідація - Втрата: {val_losses[-1]:.4f}, Точність: {val_accuracies[-1]:.4f}")
 
 
-def plot_training_history(history):
+def plot_training():
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
-    plt.plot(history.history['loss'], label='Train Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.legend()
     plt.title('Графік втрат')
 
     plt.subplot(1, 2, 2)
-    plt.plot(history.history['accuracy'], label='Train Accuracy')
-    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.plot(train_accuracies, label='Train Accuracy')
+    plt.plot(val_accuracies, label='Validation Accuracy')
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
     plt.legend()
@@ -120,31 +148,35 @@ def plot_training_history(history):
     plt.show()
 
 
-plot_training_history(history)
+plot_training()
 
-model.save("inception_v3_custom.h5")
+torch.save(model.state_dict(), "inception_v3.pth")
+with open("class_names.json", "w") as f:
+    json.dump(class_names, f)
 
 
 def predict_image(image_path):
-    model = tf.keras.models.load_model("inception_v3_custom.h5")
+    model.load_state_dict(torch.load("inception_v3.pth"))
+    model.eval()
+    transform = transforms.Compose([
+        transforms.Resize((299, 299)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
 
-    img = load_img(image_path, target_size=(299, 299))
-    img_array = img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0)
-    img_array = tf.keras.applications.inception_v3.preprocess_input(img_array)
+    image = Image.open(image_path).convert("RGB")
+    image = transform(image).unsqueeze(0).to(device)
 
-    predictions = model.predict(img_array)
-    predicted_class = np.argmax(predictions[0])
-    predicted_label = class_names[predicted_class]
+    with torch.no_grad():
+        output = model(image)[0]
+        predicted = torch.argmax(output).item()
 
-    plt.imshow(img)
+    print(f"Передбачена порода: {class_names[predicted]}")
+
+    plt.imshow(Image.open(image_path))
     plt.axis("off")
-    plt.title(f"Клас: {predicted_label}")
+    plt.title(f"Клас: {class_names[predicted]}")
     plt.show()
-
-    print(f"Передбачена порода: {predicted_label}")
 
 
 predict_image("/content/drive/MyDrive/Colab Notebooks/dogs/PXL_20250128_174735529.jpg")
-predict_image("/content/drive/MyDrive/Colab Notebooks/dogs/working-german-shepherds-as-pets-and-companions.jpg")
-predict_image("/content/drive/MyDrive/Colab Notebooks/dogs/n02106550_107.jpg")
