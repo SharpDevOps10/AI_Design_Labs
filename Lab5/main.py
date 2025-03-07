@@ -1,40 +1,101 @@
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import os
-from tensorflow.keras.applications import InceptionV3
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
-from tensorflow.keras.models import Model
 import numpy as np
+import json
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, GlobalAveragePooling2D, Dense, Input
+from tensorflow.keras.models import Model
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.utils import image_dataset_from_directory
+from tensorflow.keras.layers import concatenate
+
+dataset_path = "/content/dogs/dog-breeds"
+
+batch_size = 32
+img_size = (299, 299)
+
+train_dataset = image_dataset_from_directory(
+    dataset_path,
+    image_size=img_size,
+    batch_size=batch_size,
+    validation_split=0.2,
+    subset="training",
+    seed=123
+)
+
+val_dataset = image_dataset_from_directory(
+    dataset_path,
+    image_size=img_size,
+    batch_size=batch_size,
+    validation_split=0.2,
+    subset="validation",
+    seed=123
+)
+
+class_names = train_dataset.class_names
+num_classes = len(class_names)
+print(f"Класи: {class_names}")
 
 
 def preprocess(image, label):
-    image = tf.image.resize(image, (299, 299))
     image = tf.keras.applications.inception_v3.preprocess_input(image)
     return image, label
 
 
-dataset, info = tfds.load("stanford_dogs", split=["train", "test"], as_supervised=True, with_info=True)
-train_dataset, test_dataset = dataset
+train_dataset = train_dataset.map(preprocess)
+val_dataset = val_dataset.map(preprocess)
 
-train_dataset = train_dataset.map(preprocess).batch(32).prefetch(tf.data.AUTOTUNE)
-test_dataset = test_dataset.map(preprocess).batch(32).prefetch(tf.data.AUTOTUNE)
 
-base_model = InceptionV3(weights="imagenet", include_top=False, input_shape=(299, 299, 3))
+def InceptionBlock(x, filters):
+    f1, f3r, f3, f5r, f5, proj = filters
 
-for layer in base_model.layers:
-    layer.trainable = False
+    conv1x1_1 = Conv2D(f1, (1, 1), padding='same', activation='relu')(x)
 
-x = base_model.output
-x = GlobalAveragePooling2D()(x)
-x = Dense(1024, activation="relu")(x)
-predictions = Dense(info.features["label"].num_classes, activation="softmax")(x)
+    conv3x3 = Conv2D(f3r, (1, 1), padding='same', activation='relu')(x)
+    conv3x3 = Conv2D(f3, (3, 3), padding='same', activation='relu')(conv3x3)
 
-model = Model(inputs=base_model.input, outputs=predictions)
+    conv5x5 = Conv2D(f5r, (1, 1), padding='same', activation='relu')(x)
+    conv5x5 = Conv2D(f5, (5, 5), padding='same', activation='relu')(conv5x5)
+    maxpool = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
+    maxpool = Conv2D(proj, (1, 1), padding='same', activation='relu')(maxpool)
+
+    output = concatenate([conv1x1_1, conv3x3, conv5x5, maxpool], axis=-1)
+    return output
+
+
+def InceptionV3Custom(num_classes):
+    input_layer = Input(shape=(299, 299, 3))
+
+    x = Conv2D(32, (3, 3), strides=(2, 2), padding='valid', activation='relu')(input_layer)
+    x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
+    x = MaxPooling2D((3, 3), strides=(2, 2))(x)
+
+    x = Conv2D(80, (1, 1), padding='valid', activation='relu')(x)
+    x = Conv2D(192, (3, 3), padding='valid', activation='relu')(x)
+    x = MaxPooling2D((3, 3), strides=(2, 2))(x)
+
+    x = InceptionBlock(x, (64, 48, 64, 64, 96, 32))
+    x = InceptionBlock(x, (64, 48, 64, 64, 96, 64))
+    x = InceptionBlock(x, (64, 48, 64, 64, 96, 64))
+
+    x = GlobalAveragePooling2D()(x)
+    x = Dense(1024, activation='relu')(x)
+    predictions = Dense(num_classes, activation='softmax')(x)
+
+    model = Model(inputs=input_layer, outputs=predictions)
+    return model
+
+
+model = InceptionV3Custom(num_classes)
 model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+model.summary()
 
-epochs = 5
-history = model.fit(train_dataset, validation_data=test_dataset, epochs=epochs)
+epochs = 50
+history = model.fit(
+    train_dataset,
+    validation_data=val_dataset,
+    epochs=epochs
+)
 
 
 def plot_training_history(history):
@@ -61,34 +122,29 @@ def plot_training_history(history):
 
 plot_training_history(history)
 
-model.save("dog_classifier.h5")
+model.save("inception_v3_custom.h5")
 
 
-def predict_and_display_images(directory):
-    model = tf.keras.models.load_model("dog_classifier.h5")
-    class_names = info.features["label"].names
+def predict_image(image_path):
+    model = tf.keras.models.load_model("inception_v3_custom.h5")
 
-    fig, axes = plt.subplots(3, 3, figsize=(12, 12))
-    axes = axes.flatten()
+    img = load_img(image_path, target_size=(299, 299))
+    img_array = img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = tf.keras.applications.inception_v3.preprocess_input(img_array)
 
-    image_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(('.jpg', '.png'))][:9]
+    predictions = model.predict(img_array)
+    predicted_class = np.argmax(predictions[0])
+    predicted_label = class_names[predicted_class]
 
-    for i, img_path in enumerate(image_files):
-        img = load_img(img_path, target_size=(299, 299))
-        img_array = img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0)
-        img_array = tf.keras.applications.inception_v3.preprocess_input(img_array)
-
-        predictions = model.predict(img_array)
-        predicted_class = np.argmax(predictions[0])
-        predicted_label = class_names[predicted_class]
-
-        axes[i].imshow(img)
-        axes[i].axis("off")
-        axes[i].set_title(f"Клас: {predicted_label}")
-
+    plt.imshow(img)
+    plt.axis("off")
+    plt.title(f"Клас: {predicted_label}")
     plt.show()
 
+    print(f"Передбачена порода: {predicted_label}")
 
-img_dir = "/content/drive/MyDrive/Colab Notebooks/dogs"
-predict_and_display_images(img_dir)
+
+predict_image("/content/drive/MyDrive/Colab Notebooks/dogs/PXL_20250128_174735529.jpg")
+predict_image("/content/drive/MyDrive/Colab Notebooks/dogs/working-german-shepherds-as-pets-and-companions.jpg")
+predict_image("/content/drive/MyDrive/Colab Notebooks/dogs/n02106550_107.jpg")
