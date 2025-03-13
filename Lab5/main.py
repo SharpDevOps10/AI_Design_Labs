@@ -1,182 +1,192 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
-from torch.utils.data import DataLoader, random_split
-import matplotlib.pyplot as plt
-from PIL import Image
 import os
-import json
+import shutil
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import EfficientNetB0
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# --- 1. Перейменування директорій (італійська -> англійська) ---
+translate_dict = {
+    "cane": "dog", "gatto": "cat", "cavallo": "horse", "ragno": "spider",
+    "farfalla": "butterfly", "gallina": "chicken", "pecora": "sheep",
+    "mucca": "cow", "scoiattolo": "squirrel", "elefante": "elephant"
+}
 
-dataset_path = "/content/dogs/dog-breeds"
+dataset_path = "/content/animals10/raw-img"
 
-transform = transforms.Compose([
-    transforms.Resize((299, 299)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+for italian_name, english_name in translate_dict.items():
+    italian_path = os.path.join(dataset_path, italian_name)
+    english_path = os.path.join(dataset_path, english_name)
+    if os.path.exists(italian_path):
+        os.rename(italian_path, english_path)
+        print(f"Renamed {italian_name} -> {english_name}")
 
-dataset = datasets.ImageFolder(root=dataset_path, transform=transform)
-print(f"Кількість зображень у датасеті: {len(dataset)}")
+# --- 2. Розділення на TRAIN / VAL директорії ---
+train_dir = os.path.join(dataset_path, "train")
+val_dir = os.path.join(dataset_path, "val")
 
-train_size = int(0.8 * len(dataset))
-val_size = len(dataset) - train_size
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+if not os.path.exists(train_dir) or not os.path.exists(val_dir):
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
 
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=32)
+    for category in translate_dict.values():
+        src_path = os.path.join(dataset_path, category)
+        train_dst = os.path.join(train_dir, category)
+        val_dst = os.path.join(val_dir, category)
 
-class_names = dataset.classes
-num_classes = len(class_names)
-print(f"Класи: {class_names}")
+        os.makedirs(train_dst, exist_ok=True)
+        os.makedirs(val_dst, exist_ok=True)
 
+        files = os.listdir(src_path)
+        np.random.shuffle(files)
+        split_idx = int(0.8 * len(files))  # 80% тренування, 20% валідація
 
-class InceptionBlock(nn.Module):
-    def __init__(self, in_channels, f1, f3_in, f3_out, f5_in, f5_out, pool_proj):
-        super(InceptionBlock, self).__init__()
+        # 80% -> TRAIN
+        for file in files[:split_idx]:
+            shutil.move(os.path.join(src_path, file), os.path.join(train_dst, file))
 
-        self.conv1x1 = nn.Conv2d(in_channels, f1, kernel_size=1)
-        self.conv3x3_1 = nn.Conv2d(in_channels, f3_in, kernel_size=1)
-        self.conv3x3_2 = nn.Conv2d(f3_in, f3_out, kernel_size=3, padding=1)
-        self.conv5x5_1 = nn.Conv2d(in_channels, f5_in, kernel_size=1)
-        self.conv5x5_2 = nn.Conv2d(f5_in, f5_out, kernel_size=5, padding=2)
-        self.pool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
-        self.pool_conv = nn.Conv2d(in_channels, pool_proj, kernel_size=1)
+        # 20% -> VAL
+        for file in files[split_idx:]:
+            shutil.move(os.path.join(src_path, file), os.path.join(val_dst, file))
 
-    def forward(self, x):
-        branch1 = self.conv1x1(x)
-        branch2 = torch.relu(self.conv3x3_2(torch.relu(self.conv3x3_1(x))))
-        branch3 = torch.relu(self.conv5x5_2(torch.relu(self.conv5x5_1(x))))
-        branch4 = self.pool_conv(self.pool(x))
-        return torch.cat([branch1, branch2, branch3, branch4], dim=1)
+    print("✅ Розділення на train та val завершено!")
+else:
+    print("✅ Train/Val директорії вже існують.")
 
+# --- 3. Завантаження датасетів ---
+train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    train_dir, image_size=(227, 227), batch_size=128, label_mode="categorical"
+)
+val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    val_dir, image_size=(227, 227), batch_size=128, label_mode="categorical"
+)
 
-class InceptionV3Custom(nn.Module):
-    def __init__(self, num_classes):
-        super(InceptionV3Custom, self).__init__()
+class_names = train_ds.class_names  # Зберігаємо назви класів
 
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
-        self.inception1 = InceptionBlock(128, 64, 48, 64, 8, 16, 32)
-        self.inception2 = InceptionBlock(176, 128, 64, 128, 16, 32, 64)
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(352, num_classes)
-
-    def forward(self, x):
-        x = torch.relu(self.conv1(x))
-        x = torch.relu(self.conv2(x))
-        x = torch.relu(self.conv3(x))
-        x = self.inception1(x)
-        x = self.inception2(x)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        return self.fc(x)
-
-
-model = InceptionV3Custom(num_classes).to(device)
-print(model)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-train_losses, val_losses = [], []
-train_accuracies, val_accuracies = [], []
-
-num_epochs = 50
-for epoch in range(num_epochs):
-    model.train()
-    running_loss, correct, total = 0.0, 0, 0
-
-    for images, labels in train_loader:
-        images, labels = images.to(device), labels.to(device)
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item()
-        _, preds = torch.max(outputs, 1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-    train_losses.append(running_loss / len(train_loader))
-    train_accuracies.append(correct / total)
-
-    model.eval()
-    val_loss, correct_val, total_val = 0.0, 0, 0
-
-    with torch.no_grad():
-        for images, labels in val_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            val_loss += loss.item()
-            _, preds = torch.max(outputs, 1)
-            correct_val += (preds == labels).sum().item()
-            total_val += labels.size(0)
-
-    val_losses.append(val_loss / len(val_loader))
-    val_accuracies.append(correct_val / total_val)
-
-    print(
-        f"Епоха {epoch + 1}: Втрата: {train_losses[-1]:.4f}, Точність: {train_accuracies[-1]:.4f} | Валідація - Втрата: {val_losses[-1]:.4f}, Точність: {val_accuracies[-1]:.4f}")
+AUTOTUNE = tf.data.AUTOTUNE
+train_dataset = train_ds.prefetch(buffer_size=AUTOTUNE)
+val_dataset = val_ds.prefetch(buffer_size=AUTOTUNE)
 
 
-def plot_training():
-    plt.figure(figsize=(12, 5))
+# --- 4. Модель AlexNet ---
+def alexnet_model(input_shape=(227, 227, 3), num_classes=10):
+    model = models.Sequential([
+        layers.Conv2D(96, (11, 11), strides=(4, 4), activation='relu', input_shape=input_shape),
+        layers.MaxPooling2D((3, 3), strides=(2, 2)),
 
-    plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.title('Графік втрат')
+        layers.Conv2D(256, (5, 5), padding='same', activation='relu'),
+        layers.MaxPooling2D((3, 3), strides=(2, 2)),
 
-    plt.subplot(1, 2, 2)
-    plt.plot(train_accuracies, label='Train Accuracy')
-    plt.plot(val_accuracies, label='Validation Accuracy')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-    plt.legend()
-    plt.title('Графік точності')
+        layers.Conv2D(384, (3, 3), padding='same', activation='relu'),
+        layers.Conv2D(384, (3, 3), padding='same', activation='relu'),
+        layers.Conv2D(256, (3, 3), padding='same', activation='relu'),
+        layers.MaxPooling2D((3, 3), strides=(2, 2)),
 
-    plt.show()
-
-
-plot_training()
-
-torch.save(model.state_dict(), "inception_v3.pth")
-with open("class_names.json", "w") as f:
-    json.dump(class_names, f)
-
-
-def predict_image(image_path):
-    model.load_state_dict(torch.load("inception_v3.pth"))
-    model.eval()
-    transform = transforms.Compose([
-        transforms.Resize((299, 299)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        layers.Flatten(),
+        layers.Dense(4096, activation='relu'),
+        layers.Dropout(0.3),
+        layers.Dense(4096, activation='relu'),
+        layers.Dropout(0.3),
+        layers.Dense(num_classes, activation='softmax')
     ])
-
-    image = Image.open(image_path).convert("RGB")
-    image = transform(image).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        output = model(image)[0]
-        predicted = torch.argmax(output).item()
-
-    print(f"Передбачена порода: {class_names[predicted]}")
-
-    plt.imshow(Image.open(image_path))
-    plt.axis("off")
-    plt.title(f"Клас: {class_names[predicted]}")
-    plt.show()
+    return model
 
 
-predict_image("/content/drive/MyDrive/Colab Notebooks/dogs/PXL_20250128_174735529.jpg")
+# --- 5. Модель EfficientNetB0 ---
+def efficientnet_model(input_shape=(227, 227, 3), num_classes=10):
+    base_model = EfficientNetB0(weights="imagenet", include_top=False, input_shape=input_shape)
+    base_model.trainable = False  # Заморожуємо базову модель
+    model = models.Sequential([
+        base_model,
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(512, activation="relu"),
+        layers.Dropout(0.3),
+        layers.Dense(num_classes, activation="softmax")
+    ])
+    return model
+
+
+# --- 6. Навчання AlexNet ---
+model_alexnet = alexnet_model()
+model_alexnet.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+history_alexnet = model_alexnet.fit(
+    train_dataset, epochs=30, validation_data=val_dataset
+)
+
+# --- 7. Навчання EfficientNetB0 ---
+model_efficientnet = efficientnet_model()
+model_efficientnet.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+history_efficientnet = model_efficientnet.fit(
+    train_dataset, epochs=30, validation_data=val_dataset
+)
+
+# --- 8. Оцінка моделей ---
+test_loss_alexnet, test_acc_alexnet = model_alexnet.evaluate(val_dataset)
+print(f'✅ AlexNet Test accuracy: {test_acc_alexnet}')
+
+test_loss_efficientnet, test_acc_efficientnet = model_efficientnet.evaluate(val_dataset)
+print(f'✅ EfficientNet Test accuracy: {test_acc_efficientnet}')
+
+
+# --- 9. Ансамбль передбачень ---
+def ensemble_predict(image):
+    pred_alexnet = model_alexnet.predict(image)
+    pred_efficientnet = model_efficientnet.predict(image)
+    final_pred = (pred_alexnet + pred_efficientnet) / 2  # Усереднення
+    return np.argmax(final_pred, axis=1)
+
+
+# --- 10. Візуалізація точності та втрат ---
+plt.figure(figsize=(12, 6))
+
+plt.subplot(1, 2, 1)
+plt.plot(history_alexnet.history['accuracy'], label='AlexNet Train Accuracy')
+plt.plot(history_alexnet.history['val_accuracy'], label='AlexNet Val Accuracy')
+plt.plot(history_efficientnet.history['accuracy'], label='EfficientNet Train Accuracy')
+plt.plot(history_efficientnet.history['val_accuracy'], label='EfficientNet Val Accuracy')
+plt.legend()
+plt.title("Accuracy Comparison")
+
+plt.subplot(1, 2, 2)
+plt.plot(history_alexnet.history['loss'], label='AlexNet Train Loss')
+plt.plot(history_alexnet.history['val_loss'], label='AlexNet Val Loss')
+plt.plot(history_efficientnet.history['loss'], label='EfficientNet Train Loss')
+plt.plot(history_efficientnet.history['val_loss'], label='EfficientNet Val Loss')
+plt.legend()
+plt.title("Loss Comparison")
+
+plt.show()
+
+# --- 11. Демонстрація ансамбль передбачень на тестових зображеннях ---
+test_images, test_labels = next(iter(val_dataset))
+
+plt.figure(figsize=(10, 10))
+for i in range(9):
+    plt.subplot(3, 3, i + 1)
+    plt.imshow(test_images[i].numpy().astype("uint8"))
+
+    predicted_label = ensemble_predict(np.expand_dims(test_images[i], axis=0))[0]
+    true_label = np.argmax(test_labels[i])
+
+    true_class = class_names[true_label]
+    predicted_class = class_names[predicted_label]
+
+    plt.title(f"True: {true_class}\nPred: {predicted_class}")
+    plt.axis('off')
+
+plt.show()
+
+# --- 12. Збереження моделей ---
+model_alexnet.save('alexnet_animals10.h5')
+model_efficientnet.save('efficientnet_animals10.h5')
+
+print("✅ Моделі збережено!")
