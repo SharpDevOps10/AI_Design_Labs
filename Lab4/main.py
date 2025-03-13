@@ -1,10 +1,12 @@
 import os
+import shutil
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models
 from tensorflow.keras.applications import EfficientNetB0
 
+# --- 1. Перейменування директорій (італійська -> англійська) ---
 translate_dict = {
     "cane": "dog", "gatto": "cat", "cavallo": "horse", "ragno": "spider",
     "farfalla": "butterfly", "gallina": "chicken", "pecora": "sheep",
@@ -20,9 +22,39 @@ for italian_name, english_name in translate_dict.items():
         os.rename(italian_path, english_path)
         print(f"Renamed {italian_name} -> {english_name}")
 
+# --- 2. Розділення на TRAIN / VAL директорії ---
 train_dir = os.path.join(dataset_path, "train")
 val_dir = os.path.join(dataset_path, "val")
 
+if not os.path.exists(train_dir) or not os.path.exists(val_dir):
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
+
+    for category in translate_dict.values():
+        src_path = os.path.join(dataset_path, category)
+        train_dst = os.path.join(train_dir, category)
+        val_dst = os.path.join(val_dir, category)
+
+        os.makedirs(train_dst, exist_ok=True)
+        os.makedirs(val_dst, exist_ok=True)
+
+        files = os.listdir(src_path)
+        np.random.shuffle(files)
+        split_idx = int(0.8 * len(files))  # 80% тренування, 20% валідація
+
+        # 80% -> TRAIN
+        for file in files[:split_idx]:
+            shutil.move(os.path.join(src_path, file), os.path.join(train_dst, file))
+
+        # 20% -> VAL
+        for file in files[split_idx:]:
+            shutil.move(os.path.join(src_path, file), os.path.join(val_dst, file))
+
+    print("✅ Розділення на train та val завершено!")
+else:
+    print("✅ Train/Val директорії вже існують.")
+
+# --- 3. Завантаження датасетів ---
 train_ds = tf.keras.preprocessing.image_dataset_from_directory(
     train_dir, image_size=(227, 227), batch_size=128, label_mode="categorical"
 )
@@ -30,13 +62,14 @@ val_ds = tf.keras.preprocessing.image_dataset_from_directory(
     val_dir, image_size=(227, 227), batch_size=128, label_mode="categorical"
 )
 
-class_names = train_ds.class_names  # Збереження класів
+class_names = train_ds.class_names  # Зберігаємо назви класів
 
 AUTOTUNE = tf.data.AUTOTUNE
 train_dataset = train_ds.prefetch(buffer_size=AUTOTUNE)
 val_dataset = val_ds.prefetch(buffer_size=AUTOTUNE)
 
 
+# --- 4. Модель AlexNet ---
 def alexnet_model(input_shape=(227, 227, 3), num_classes=10):
     model = models.Sequential([
         layers.Conv2D(96, (11, 11), strides=(4, 4), activation='relu', input_shape=input_shape),
@@ -60,9 +93,10 @@ def alexnet_model(input_shape=(227, 227, 3), num_classes=10):
     return model
 
 
+# --- 5. Модель EfficientNetB0 ---
 def efficientnet_model(input_shape=(227, 227, 3), num_classes=10):
     base_model = EfficientNetB0(weights="imagenet", include_top=False, input_shape=input_shape)
-    base_model.trainable = False
+    base_model.trainable = False  # Заморожуємо базову модель
     model = models.Sequential([
         base_model,
         layers.GlobalAveragePooling2D(),
@@ -73,6 +107,7 @@ def efficientnet_model(input_shape=(227, 227, 3), num_classes=10):
     return model
 
 
+# --- 6. Навчання AlexNet ---
 model_alexnet = alexnet_model()
 model_alexnet.compile(
     optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
@@ -83,6 +118,7 @@ history_alexnet = model_alexnet.fit(
     train_dataset, epochs=30, validation_data=val_dataset
 )
 
+# --- 7. Навчання EfficientNetB0 ---
 model_efficientnet = efficientnet_model()
 model_efficientnet.compile(
     optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
@@ -93,22 +129,23 @@ history_efficientnet = model_efficientnet.fit(
     train_dataset, epochs=30, validation_data=val_dataset
 )
 
+# --- 8. Оцінка моделей ---
 test_loss_alexnet, test_acc_alexnet = model_alexnet.evaluate(val_dataset)
-print(f'AlexNet Test accuracy: {test_acc_alexnet}')
+print(f'✅ AlexNet Test accuracy: {test_acc_alexnet}')
 
 test_loss_efficientnet, test_acc_efficientnet = model_efficientnet.evaluate(val_dataset)
-print(f'EfficientNet Test accuracy: {test_acc_efficientnet}')
+print(f'✅ EfficientNet Test accuracy: {test_acc_efficientnet}')
 
 
+# --- 9. Ансамбль передбачень ---
 def ensemble_predict(image):
     pred_alexnet = model_alexnet.predict(image)
     pred_efficientnet = model_efficientnet.predict(image)
-    final_pred = (pred_alexnet + pred_efficientnet) / 2
+    final_pred = (pred_alexnet + pred_efficientnet) / 2  # Усереднення
     return np.argmax(final_pred, axis=1)
 
 
-test_images, test_labels = next(iter(val_dataset))
-
+# --- 10. Візуалізація точності та втрат ---
 plt.figure(figsize=(12, 6))
 
 plt.subplot(1, 2, 1)
@@ -129,6 +166,9 @@ plt.title("Loss Comparison")
 
 plt.show()
 
+# --- 11. Демонстрація ансамбль передбачень на тестових зображеннях ---
+test_images, test_labels = next(iter(val_dataset))
+
 plt.figure(figsize=(10, 10))
 for i in range(9):
     plt.subplot(3, 3, i + 1)
@@ -145,5 +185,8 @@ for i in range(9):
 
 plt.show()
 
+# --- 12. Збереження моделей ---
 model_alexnet.save('alexnet_animals10.h5')
 model_efficientnet.save('efficientnet_animals10.h5')
+
+print("✅ Моделі збережено!")
