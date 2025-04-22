@@ -1,0 +1,13 @@
+train: /content/drive/MyDrive/Colab Notebooks/dataset_yolo_aug/images/train
+val: /content/drive/MyDrive/Colab Notebooks/dataset_yolo_aug/images/val
+
+nc: 8
+names:
+  - labrador_retriever
+  - rottweiler
+  - german_shepherd
+  - french_bulldog
+  - saint_bernard
+  - siberian_husky
+  - vizsla
+  - beagle
